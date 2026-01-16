@@ -1,12 +1,11 @@
 import express from "express";
+import { v0 } from "v0-sdk";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const API_KEY = process.env.API_KEY || "";
 const PORT = process.env.PORT || 3000;
-
-const jobs = new Map();
 
 function requireApiKey(req, res, next) {
   if (!API_KEY) return res.status(500).json({ error: "API_KEY not set on server" });
@@ -15,104 +14,89 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-function makeJobId() {
-  return "job_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-}
-
-async function runJob(job_id) {
-  const job = jobs.get(job_id);
-  if (!job) return;
-
-  job.status = "running";
-  jobs.set(job_id, job);
-
-  try {
-    // attendre 10 secondes (simulation)
-    await new Promise((r) => setTimeout(r, 10000));
-
-    const fakeUrl = `https://example.com/site/${job_id}`;
-
-    job.status = "done";
-    job.site_url = fakeUrl;
-    jobs.set(job_id, job);
-
-    await fetch(job.callback_url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        row_id: job.row_id,
-        job_id,
-        status: "done",
-        site_url: fakeUrl,
-        error: null
-      })
-    });
-  } catch (e) {
-    job.status = "error";
-    job.error = String(e?.message || e);
-    jobs.set(job_id, job);
-
-    try {
-      await fetch(job.callback_url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          row_id: job.row_id,
-          job_id,
-          status: "error",
-          site_url: null,
-          error: job.error
-        })
-      });
-    } catch (_) {}
-  }
-}
-
 app.get("/", (req, res) => res.send("OK"));
 
-app.post("/jobs", requireApiKey, (req, res) => {
-  const { row_id, prompt, callback_url } = req.body || {};
-  if (!row_id || !prompt || !callback_url) {
-    return res.status(400).json({ error: "Missing row_id, prompt, or callback_url" });
-  }
-
-  const job_id = makeJobId();
-  jobs.set(job_id, {
-    job_id,
-    status: "queued",
-    row_id,
-    prompt,
-    callback_url,
-    site_url: null,
-    error: null
-  });
-
-  (async () => {
-  // Lance le travail et attends la fin (synchrone)
+/**
+ * POST /jobs
+ * Body:
+ * {
+ *   "row_id": "123",
+ *   "prompt": "...",
+ *   "chat_id": "optional existing chat id"
+ * }
+ *
+ * Returns:
+ * { "status": "done", "job_id": "...", "chat_id": "...", "site_url": "...", "error": null }
+ */
+app.post("/jobs", requireApiKey, async (req, res) => {
   try {
-    await new Promise((r) => setTimeout(r, 10000));
-    const fakeUrl = `https://example.com/site/${job_id}`;
-
-    const job = jobs.get(job_id);
-    if (job) {
-      job.status = "done";
-      job.site_url = fakeUrl;
-      jobs.set(job_id, job);
+    const V0_API_KEY = process.env.V0_API_KEY;
+    if (!V0_API_KEY) {
+      return res.status(500).json({ status: "error", error: "V0_API_KEY not set on server" });
     }
 
-    return res.json({ job_id, status: "done", site_url: fakeUrl, error: null });
+    const { row_id, prompt, chat_id } = req.body || {};
+
+    if (!row_id || !prompt) {
+      return res.status(400).json({ status: "error", error: "Missing row_id or prompt" });
+    }
+
+    // Juste pour tracer côté Make si tu veux
+    const job_id =
+      "job_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+    // IMPORTANT:
+    // v0-sdk utilise la variable d'env V0_API_KEY (ou la config interne du SDK).
+    // Ici on suppose que ton SDK lit process.env.V0_API_KEY tout seul.
+    // (Sinon Render va logguer une erreur; on ajustera.)
+    let chat;
+
+    if (chat_id && String(chat_id).trim().length > 0) {
+      // Modifier / itérer sur le même site (même contexte)
+      chat = await v0.chats.sendMessage({
+        chatId: String(chat_id).trim(),
+        message: prompt
+      });
+    } else {
+      // Créer un nouveau site
+      chat = await v0.chats.create({
+        message: prompt
+      });
+    }
+
+    // Selon l’API, la démo partageable est souvent dans chat.demo.
+    // On met des fallbacks au cas où la forme varie.
+    const returnedChatId =
+      chat?.id || chat?.chatId || chat?.chat_id || chat_id || null;
+
+    const siteUrl =
+      chat?.demo ||
+      chat?.webUrl ||
+      chat?.url ||
+      chat?.output?.demo ||
+      null;
+
+    if (!siteUrl) {
+      return res.status(500).json({
+        status: "error",
+        job_id,
+        chat_id: returnedChatId,
+        site_url: null,
+        error: "v0 response did not include a site URL (demo/webUrl/url)"
+      });
+    }
+
+    return res.json({
+      status: "done",
+      job_id,
+      chat_id: returnedChatId,
+      site_url: siteUrl,
+      error: null
+    });
   } catch (e) {
-    const err = String(e?.message || e);
-    const job = jobs.get(job_id);
-    if (job) {
-      job.status = "error";
-      job.error = err;
-      jobs.set(job_id, job);
-    }
-    return res.status(500).json({ job_id, status: "error", site_url: null, error: err });
+    const msg = String(e?.message || e);
+    return res.status(500).json({ status: "error", error: msg });
   }
-})();
-
 });
 
 app.listen(PORT, () => {
