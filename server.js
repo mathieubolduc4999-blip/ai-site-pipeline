@@ -1,5 +1,16 @@
+import { V0 } from 'v0-sdk'
+const v0 = new V0({ apiKey: process.env.V0_API_KEY })
+``` :contentReference[oaicite:1]{index=1}
+
+Donc ton code `import { v0 } from "v0-sdk"` risque d’échouer.
+
+## Fais ceci :
+
+GitHub → ouvre `server.js` → ✏️ Edit → remplace TOUT par ce code (copie-colle)
+
+```js
 import express from "express";
-import { v0 } from "v0-sdk";
+import { V0 } from "v0-sdk";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -16,65 +27,38 @@ function requireApiKey(req, res, next) {
 
 app.get("/", (req, res) => res.send("OK"));
 
-/**
- * POST /jobs
- * Body:
- * {
- *   "row_id": "123",
- *   "prompt": "...",
- *   "chat_id": "optional existing chat id"
- * }
- *
- * Returns:
- * { "status": "done", "job_id": "...", "chat_id": "...", "site_url": "...", "error": null }
- */
 app.post("/jobs", requireApiKey, async (req, res) => {
   try {
-    const V0_API_KEY = process.env.V0_API_KEY;
-    if (!V0_API_KEY) {
-      return res.status(500).json({ status: "error", error: "V0_API_KEY not set on server" });
-    }
-
     const { row_id, prompt, chat_id } = req.body || {};
-
     if (!row_id || !prompt) {
       return res.status(400).json({ status: "error", error: "Missing row_id or prompt" });
     }
 
-    // Juste pour tracer côté Make si tu veux
+    if (!process.env.V0_API_KEY) {
+      return res.status(500).json({ status: "error", error: "V0_API_KEY not set on server" });
+    }
+
+    // Init SDK (doc officielle)
+    const v0 = new V0({ apiKey: process.env.V0_API_KEY }); :contentReference[oaicite:2]{index=2}
+
     const job_id =
       "job_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
-    // IMPORTANT:
-    // v0-sdk utilise la variable d'env V0_API_KEY (ou la config interne du SDK).
-    // Ici on suppose que ton SDK lit process.env.V0_API_KEY tout seul.
-    // (Sinon Render va logguer une erreur; on ajustera.)
     let chat;
-
     if (chat_id && String(chat_id).trim().length > 0) {
-      // Modifier / itérer sur le même site (même contexte)
-      chat = await v0.chats.sendMessage({
-        chatId: String(chat_id).trim(),
+      // modifier le même chat/site
+      chat = await v0.chats.sendMessage(String(chat_id).trim(), {
         message: prompt
-      });
+      }); :contentReference[oaicite:3]{index=3}
     } else {
-      // Créer un nouveau site
-      chat = await v0.chats.create({
-        message: prompt
-      });
+      // créer un nouveau chat/site
+      chat = await v0.chats.create({ message: prompt }); :contentReference[oaicite:4]{index=4}
     }
 
-    // Selon l’API, la démo partageable est souvent dans chat.demo.
-    // On met des fallbacks au cas où la forme varie.
-    const returnedChatId =
-      chat?.id || chat?.chatId || chat?.chat_id || chat_id || null;
-
-    const siteUrl =
-      chat?.demo ||
-      chat?.webUrl ||
-      chat?.url ||
-      chat?.output?.demo ||
-      null;
+    // La doc montre chat.webUrl (et v0 expose aussi des démos selon les features),
+    // on prend ce qu’on a:
+    const returnedChatId = chat?.id || null;
+    const siteUrl = chat?.webUrl || chat?.demo || chat?.url || null;
 
     if (!siteUrl) {
       return res.status(500).json({
@@ -82,7 +66,7 @@ app.post("/jobs", requireApiKey, async (req, res) => {
         job_id,
         chat_id: returnedChatId,
         site_url: null,
-        error: "v0 response did not include a site URL (demo/webUrl/url)"
+        error: "v0 response did not include webUrl/demo/url"
       });
     }
 
@@ -94,8 +78,7 @@ app.post("/jobs", requireApiKey, async (req, res) => {
       error: null
     });
   } catch (e) {
-    const msg = String(e?.message || e);
-    return res.status(500).json({ status: "error", error: msg });
+    return res.status(500).json({ status: "error", error: String(e?.message || e) });
   }
 });
 
