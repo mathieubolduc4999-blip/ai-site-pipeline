@@ -87,8 +87,32 @@ app.post("/jobs", requireApiKey, (req, res) => {
     error: null
   });
 
-  runJob(job_id);
-  return res.json({ job_id, status: "queued" });
+  (async () => {
+  // Lance le travail et attends la fin (synchrone)
+  try {
+    await new Promise((r) => setTimeout(r, 10000));
+    const fakeUrl = `https://example.com/site/${job_id}`;
+
+    const job = jobs.get(job_id);
+    if (job) {
+      job.status = "done";
+      job.site_url = fakeUrl;
+      jobs.set(job_id, job);
+    }
+
+    return res.json({ job_id, status: "done", site_url: fakeUrl, error: null });
+  } catch (e) {
+    const err = String(e?.message || e);
+    const job = jobs.get(job_id);
+    if (job) {
+      job.status = "error";
+      job.error = err;
+      jobs.set(job_id, job);
+    }
+    return res.status(500).json({ job_id, status: "error", site_url: null, error: err });
+  }
+})();
+
 });
 
 app.listen(PORT, () => {
