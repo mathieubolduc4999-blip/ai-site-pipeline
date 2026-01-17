@@ -1,6 +1,12 @@
 import express from "express";
 import { generateText } from "ai";
 import { v0 } from "v0-sdk";
+import { createGateway } from "ai";
+
+globalThis.AI_SDK_DEFAULT_PROVIDER = createGateway({
+  apiKey: process.env.AI_GATEWAY_API_KEY ?? "",
+});
+
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
