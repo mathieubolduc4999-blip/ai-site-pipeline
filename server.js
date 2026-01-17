@@ -15,10 +15,12 @@ const V0_API_KEY = process.env.V0_API_KEY || "";
 
 // Vercel AI Gateway (OpenAI-compatible)
 const AI_GATEWAY_API_KEY = process.env.AI_GATEWAY_API_KEY || "";
-const AI_GATEWAY_BASE_URL = process.env.AI_GATEWAY_BASE_URL || "https://ai-gateway.vercel.sh/v1";
+const AI_GATEWAY_BASE_URL =
+  process.env.AI_GATEWAY_BASE_URL || "https://ai-gateway.vercel.sh/v1";
 
-// Choisis un modele "Image Gen" disponible dans ton AI Gateway (tu peux le changer plus tard)
-const IMAGE_MODEL = process.env.IMAGE_MODEL || "google/gemini-2.5-flash-image";
+// IMPORTANT: Gemini image model (via AI Gateway)
+const IMAGE_MODEL =
+  process.env.IMAGE_MODEL || "google/gemini-2.5-flash-image-preview";
 
 function requireApiKey(req, res, next) {
   if (!API_KEY) return res.status(500).json({ error: "API_KEY not set on server" });
@@ -51,59 +53,59 @@ async function postCallback(callback_url, payload) {
       body: JSON.stringify(payload),
     });
   } catch (e) {
-    // On ne crash pas si callback rate; on loggue
     console.error("Callback failed:", e?.message || e);
   }
 }
 
-// Helper: generer 2 images via AI Gateway
+// Helper: generate ONE image via Gemini (AI Gateway) using chat.completions + modalities
+async function generateOneImageViaGemini({ client, prompt }) {
+  const rr = await client.chat.completions.create({
+    model: IMAGE_MODEL,
+    messages: [{ role: "user", content: prompt }],
+    // Gemini image generation via AI Gateway uses chat.completions with modalities
+    modalities: ["image"],
+    stream: false,
+  });
+
+  const msg = rr?.choices?.[0]?.message;
+
+  // AI Gateway commonly returns image(s) in message.images
+  const url = msg?.images?.[0]?.image_url?.url;
+
+  if (!url) {
+    // fallback: sometimes content might include image_url blocks (rare, but safe)
+    const contentArr = Array.isArray(msg?.content) ? msg.content : [];
+    const alt = contentArr.find((c) => c?.type === "image_url")?.image_url?.url;
+    if (!alt) throw new Error("No image URL returned from Gemini response");
+    return alt;
+  }
+
+  return url; // can be https URL OR data:image/... base64
+}
+
+// Helper: generer 2 images via AI Gateway (Gemini)
 async function generateImagesViaAIGateway({ businessName, businessType, location }) {
   if (!AI_GATEWAY_API_KEY) throw new Error("AI_GATEWAY_API_KEY not set on server");
 
   const client = new OpenAI({
     apiKey: AI_GATEWAY_API_KEY,
-    baseURL: AI_GATEWAY_BASE_URL, // AI Gateway OpenAI-compatible :contentReference[oaicite:2]{index=2}
+    baseURL: AI_GATEWAY_BASE_URL,
   });
 
-  // prompts simples, photorealistes, sans texte
   const heroPrompt =
     `Photorealistic hero image for a local service business website. ` +
     `Business: ${businessName || "Local Services"}. Type: ${businessType || "services"}. ` +
-    `Location: ${location || "Quebec"}. Clean, modern, professional, natural lighting. No text, no logos.`;
+    `Location: ${location || "Quebec"}. Clean, modern, professional, natural lighting. ` +
+    `No text, no logos, no watermarks.`;
 
   const contactPrompt =
     `Photorealistic image for the contact section of a local services website. ` +
     `Business: ${businessName || "Local Services"}. Type: ${businessType || "services"}. ` +
-    `Location: ${location || "Quebec"}. Friendly, trustworthy, professional. No text, no logos.`;
+    `Location: ${location || "Quebec"}. Friendly, trustworthy, professional. ` +
+    `No text, no logos, no watermarks.`;
 
-  // OPTION A: endpoint images.generate (si le modele le supporte)
-  // OPTION B: fallback sur chat.completions + modalities (certains modeles le demandent) :contentReference[oaicite:3]{index=3}
-  async function genOne(prompt) {
-    try {
-      const r = await client.images.generate({
-        model: IMAGE_MODEL,
-        prompt,
-        size: "1024x1024",
-      });
-      // OpenAI-like response: r.data[0].url
-      const url = r?.data?.[0]?.url;
-      if (!url) throw new Error("No image URL returned (images.generate)");
-      return url;
-    } catch (e) {
-      // fallback multimodal (certains modeles d'AI Gateway utilisent chat/completions + modalities)
-      const rr = await client.chat.completions.create({
-        model: IMAGE_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        modalities: ["text", "image"],
-      });
-      const img = rr?.choices?.[0]?.message?.content?.find?.(c => c?.type === "image_url")?.image_url?.url;
-      if (!img) throw new Error(`No image URL returned (fallback). Original error: ${e?.message || e}`);
-      return img;
-    }
-  }
-
-  const heroUrl = await genOne(heroPrompt);
-  const contactUrl = await genOne(contactPrompt);
+  const heroUrl = await generateOneImageViaGemini({ client, prompt: heroPrompt });
+  const contactUrl = await generateOneImageViaGemini({ client, prompt: contactPrompt });
 
   return { heroUrl, contactUrl };
 }
@@ -171,20 +173,18 @@ app.post("/jobs", requireApiKey, async (req, res) => {
       const incomingChatId = String(req.body?.chat_id || "").trim();
 
       if (incomingChatId) {
-        // modifier un site existant
         chat = await v0.chats.sendMessage({
           chatId: incomingChatId,
           message: finalPrompt,
-        }); // :contentReference[oaicite:4]{index=4}
+        });
       } else {
-        // creer un nouveau site
         chat = await v0.chats.create({
           message: finalPrompt,
-        }); // :contentReference[oaicite:5]{index=5}
+        });
       }
 
       const chat_id = chat?.id || incomingChatId || "";
-      const site_url = chat?.demo || chat?.webUrl || chat?.url || null; // demo est mentionne dans quickstart :contentReference[oaicite:6]{index=6}
+      const site_url = chat?.demo || chat?.webUrl || chat?.url || null;
 
       if (!site_url) throw new Error("v0 did not return a demo/webUrl/url");
 
