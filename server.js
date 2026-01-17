@@ -231,4 +231,24 @@ app.post("/jobs", requireApiKey, async (req, res) => {
   })();
 });
 
+app.get("/debug-image", requireApiKey, async (req, res) => {
+  try {
+    const result = await generateText({
+      model: gateway(IMAGE_MODEL),
+      prompt: "Render a photorealistic picture of a red balloon. No text.",
+    });
+
+    const file = (result.files || []).find(
+      (f) => (f?.mediaType || "").startsWith("image/") && f?.uint8Array
+    );
+    if (!file) return res.status(500).json({ ok: false, error: "No image in result.files" });
+
+    const base64 = Buffer.from(file.uint8Array).toString("base64");
+    res.json({ ok: true, mediaType: file.mediaType, dataUrlPrefix: `data:${file.mediaType};base64,` , base64Len: base64.length });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
