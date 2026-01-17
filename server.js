@@ -1,30 +1,28 @@
 import express from "express";
-import { generateText } from "ai";
+import { generateText, createGateway } from "ai";
 import { v0 } from "v0-sdk";
-import { createGateway } from "ai";
-
-globalThis.AI_SDK_DEFAULT_PROVIDER = createGateway({
-  apiKey: process.env.AI_GATEWAY_API_KEY ?? "",
-});
-
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 3000;
 
-// Secret pour que personne d'autre que Make puisse appeler ton API
+// Secrets / keys
 const API_KEY = process.env.API_KEY || "";
-
-// v0
 const V0_API_KEY = process.env.V0_API_KEY || "";
 
-// Vercel AI Gateway (AI SDK lit AI_GATEWAY_API_KEY automatiquement)
+// AI Gateway / Nano Banana
 const AI_GATEWAY_API_KEY = process.env.AI_GATEWAY_API_KEY || "";
-
-// Nano Banana (Gemini 2.5 Flash Image) via AI Gateway + AI SDK
 const IMAGE_MODEL = process.env.IMAGE_MODEL || "google/gemini-2.5-flash-image";
 
+// Force AI SDK to use AI Gateway explicitly
+const gateway = createGateway({
+  apiKey: AI_GATEWAY_API_KEY,
+  // AI Gateway runtime endpoint (works outside Vercel too)
+  baseURL: "https://ai-gateway.vercel.sh/v3/ai",
+});
+
+// ---- helpers ----
 function requireApiKey(req, res, next) {
   if (!API_KEY) return res.status(500).json({ error: "API_KEY not set on server" });
   const provided = req.header("X-Api-Key");
@@ -36,18 +34,6 @@ function makeJobId() {
   return "job_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-// stockage simple en RAM (OK pour demo). Pour prod: Redis/DB.
-const jobs = new Map(); // job_id -> {status, row_id, chat_id, site_url, image_urls, error}
-
-app.get("/", (req, res) => res.send("OK"));
-
-app.get("/jobs/:job_id", requireApiKey, (req, res) => {
-  const job = jobs.get(req.params.job_id);
-  if (!job) return res.status(404).json({ status: "error", error: "Job not found" });
-  res.json(job);
-});
-
-// Helper: POST vers Make callback
 async function postCallback(callback_url, payload) {
   try {
     await fetch(callback_url, {
@@ -60,27 +46,56 @@ async function postCallback(callback_url, payload) {
   }
 }
 
-// Helper: genere 1 image (data URL) avec Nano Banana via AI SDK (AI Gateway)
+// In-memory job store (OK demo)
+const jobs = new Map(); // job_id -> {status, row_id, chat_id, site_url, image_urls, error}
+
+app.get("/", (req, res) => res.send("OK"));
+
+app.get("/jobs/:job_id", requireApiKey, (req, res) => {
+  const job = jobs.get(req.params.job_id);
+  if (!job) return res.status(404).json({ status: "error", error: "Job not found" });
+  res.json(job);
+});
+
+// Debug endpoint to validate AI Gateway auth
+app.get("/debug-gateway", requireApiKey, async (req, res) => {
+  try {
+    const credits = await gateway.getCredits();
+    res.json({ ok: true, credits });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: String(e?.message || e),
+      has_key: Boolean(process.env.AI_GATEWAY_API_KEY),
+      key_len: (process.env.AI_GATEWAY_API_KEY || "").length,
+      model: IMAGE_MODEL,
+    });
+  }
+});
+
+// ---- Image generation via Nano Banana (Gemini 2.5 Flash Image) ----
 async function genOneNanoBananaImage(prompt) {
   if (!AI_GATEWAY_API_KEY) throw new Error("AI_GATEWAY_API_KEY not set on server");
 
   const result = await generateText({
-    model: IMAGE_MODEL, // ex: google/gemini-2.5-flash-image
+    model: gateway(IMAGE_MODEL),
     prompt,
   });
 
-  // Nano Banana retourne les images dans result.files
+  // Nano Banana returns images in result.files (Uint8Array)
   const file = (result.files || []).find(
     (f) => (f?.mediaType || "").startsWith("image/") && f?.uint8Array
   );
 
-  if (!file) throw new Error("No image returned in result.files");
+  if (!file) {
+    // Helpful debugging
+    throw new Error("No image returned in result.files");
+  }
 
   const base64 = Buffer.from(file.uint8Array).toString("base64");
   return `data:${file.mediaType};base64,${base64}`;
 }
 
-// Helper: generer 2 images
 async function generateImages({ businessName, businessType, location }) {
   const heroPrompt =
     `Photorealistic hero image for a local service business website. ` +
@@ -100,17 +115,18 @@ async function generateImages({ businessName, businessType, location }) {
   return { heroUrl, contactUrl };
 }
 
+// ---- jobs endpoint ----
 /**
  * POST /jobs
  * Body JSON:
  * {
  *   "row_id": "123",
- *   "chat_id": "",            // optionnel (pour modifier un site existant)
+ *   "chat_id": "",            // optional: for edits
  *   "site_name": "ABC",
  *   "prompt": "....",
  *   "callback_url": "https://hook.make.com/....",
- *   "business_type": "plomberie",       // optionnel
- *   "location": "Montreal, QC"          // optionnel
+ *   "business_type": "plomberie",  // optional
+ *   "location": "Montreal, QC"     // optional
  * }
  */
 app.post("/jobs", requireApiKey, async (req, res) => {
@@ -131,10 +147,10 @@ app.post("/jobs", requireApiKey, async (req, res) => {
     error: null,
   });
 
-  // Repond tout de suite -> pas de timeout Make
+  // Respond immediately (prevents Make timeouts)
   res.json({ status: "queued", job_id });
 
-  // background job
+  // Background work
   (async () => {
     const job = jobs.get(job_id);
     if (!job) return;
@@ -143,14 +159,14 @@ app.post("/jobs", requireApiKey, async (req, res) => {
     jobs.set(job_id, job);
 
     try {
-      // 1) generer images (2 seulement)
+      // 1) Generate images
       const image_urls = await generateImages({
         businessName: req.body?.site_name || "",
         businessType: req.body?.business_type || "",
         location: req.body?.location || "",
       });
 
-      // 2) demander a v0 de generer/mettre a jour le site en incluant ces URLs
+      // 2) Ask v0 to build/update site using these URLs
       const imageInstruction =
         `IMPORTANT: Use these exact image URLs in the page.\n` +
         `- Hero image URL: ${image_urls.heroUrl}\n` +
