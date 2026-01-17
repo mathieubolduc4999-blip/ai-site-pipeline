@@ -1,5 +1,5 @@
 import express from "express";
-import OpenAI from "openai";
+import { generateText } from "ai";
 import { v0 } from "v0-sdk";
 
 const app = express();
@@ -13,14 +13,11 @@ const API_KEY = process.env.API_KEY || "";
 // v0
 const V0_API_KEY = process.env.V0_API_KEY || "";
 
-// Vercel AI Gateway (OpenAI-compatible)
+// Vercel AI Gateway (AI SDK lit AI_GATEWAY_API_KEY automatiquement)
 const AI_GATEWAY_API_KEY = process.env.AI_GATEWAY_API_KEY || "";
-const AI_GATEWAY_BASE_URL =
-  process.env.AI_GATEWAY_BASE_URL || "https://ai-gateway.vercel.sh/v1";
 
-// IMPORTANT: Gemini image model (via AI Gateway)
-const IMAGE_MODEL =
-  process.env.IMAGE_MODEL || "google/gemini-2.5-flash-image-preview";
+// Nano Banana (Gemini 2.5 Flash Image) via AI Gateway + AI SDK
+const IMAGE_MODEL = process.env.IMAGE_MODEL || "google/gemini-2.5-flash-image";
 
 function requireApiKey(req, res, next) {
   if (!API_KEY) return res.status(500).json({ error: "API_KEY not set on server" });
@@ -57,41 +54,28 @@ async function postCallback(callback_url, payload) {
   }
 }
 
-// Helper: generate ONE image via Gemini (AI Gateway) using chat.completions + modalities
-async function generateOneImageViaGemini({ client, prompt }) {
-  const rr = await client.chat.completions.create({
-    model: IMAGE_MODEL,
-    messages: [{ role: "user", content: prompt }],
-    // Gemini image generation via AI Gateway uses chat.completions with modalities
-    modalities: ["image"],
-    stream: false,
-  });
-
-  const msg = rr?.choices?.[0]?.message;
-
-  // AI Gateway commonly returns image(s) in message.images
-  const url = msg?.images?.[0]?.image_url?.url;
-
-  if (!url) {
-    // fallback: sometimes content might include image_url blocks (rare, but safe)
-    const contentArr = Array.isArray(msg?.content) ? msg.content : [];
-    const alt = contentArr.find((c) => c?.type === "image_url")?.image_url?.url;
-    if (!alt) throw new Error("No image URL returned from Gemini response");
-    return alt;
-  }
-
-  return url; // can be https URL OR data:image/... base64
-}
-
-// Helper: generer 2 images via AI Gateway (Gemini)
-async function generateImagesViaAIGateway({ businessName, businessType, location }) {
+// Helper: genere 1 image (data URL) avec Nano Banana via AI SDK (AI Gateway)
+async function genOneNanoBananaImage(prompt) {
   if (!AI_GATEWAY_API_KEY) throw new Error("AI_GATEWAY_API_KEY not set on server");
 
-  const client = new OpenAI({
-    apiKey: AI_GATEWAY_API_KEY,
-    baseURL: AI_GATEWAY_BASE_URL,
+  const result = await generateText({
+    model: IMAGE_MODEL, // ex: google/gemini-2.5-flash-image
+    prompt,
   });
 
+  // Nano Banana retourne les images dans result.files
+  const file = (result.files || []).find(
+    (f) => (f?.mediaType || "").startsWith("image/") && f?.uint8Array
+  );
+
+  if (!file) throw new Error("No image returned in result.files");
+
+  const base64 = Buffer.from(file.uint8Array).toString("base64");
+  return `data:${file.mediaType};base64,${base64}`;
+}
+
+// Helper: generer 2 images
+async function generateImages({ businessName, businessType, location }) {
   const heroPrompt =
     `Photorealistic hero image for a local service business website. ` +
     `Business: ${businessName || "Local Services"}. Type: ${businessType || "services"}. ` +
@@ -104,8 +88,8 @@ async function generateImagesViaAIGateway({ businessName, businessType, location
     `Location: ${location || "Quebec"}. Friendly, trustworthy, professional. ` +
     `No text, no logos, no watermarks.`;
 
-  const heroUrl = await generateOneImageViaGemini({ client, prompt: heroPrompt });
-  const contactUrl = await generateOneImageViaGemini({ client, prompt: contactPrompt });
+  const heroUrl = await genOneNanoBananaImage(heroPrompt);
+  const contactUrl = await genOneNanoBananaImage(contactPrompt);
 
   return { heroUrl, contactUrl };
 }
@@ -117,7 +101,7 @@ async function generateImagesViaAIGateway({ businessName, businessType, location
  *   "row_id": "123",
  *   "chat_id": "",            // optionnel (pour modifier un site existant)
  *   "site_name": "ABC",
- *   "prompt": "....",         // ton gros prompt
+ *   "prompt": "....",
  *   "callback_url": "https://hook.make.com/....",
  *   "business_type": "plomberie",       // optionnel
  *   "location": "Montreal, QC"          // optionnel
@@ -154,7 +138,7 @@ app.post("/jobs", requireApiKey, async (req, res) => {
 
     try {
       // 1) generer images (2 seulement)
-      const image_urls = await generateImagesViaAIGateway({
+      const image_urls = await generateImages({
         businessName: req.body?.site_name || "",
         businessType: req.body?.business_type || "",
         location: req.body?.location || "",
